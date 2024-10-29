@@ -1,0 +1,268 @@
+#$DPHOST = "localhost"
+#$DPPORT = 5554
+
+function checkExpiration {
+    Get-Date -UFormat "yyyy-MM-ddTHH:mm:ssZ"
+    $today = Get-Date
+    $today.ToUniversalTime()
+
+     [System.Collections.ArrayList]$expired=[System.Collections.ArrayList]::new()
+
+    foreach ($certObj in $result) {
+		$cert = $certObj.name
+        $data = "{""ViewCertificateDetails"":{""CertificateObject"": ""$cert""}}"
+        #[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+        $notafter = (Invoke-RestMethod -SkipCertificateCheck -Uri "${DPURL}/mgmt/actionqueue/${domain}" -Method Post -Body $data -Credential $credential -UseBasicParsing).CryptoCertificate.CertificateDetails.NotAfter
+
+        if ($today -gt $notafter) {
+            # Certificate expired
+			Write-Output "CERT IS EXPIRED : NAME - " $cert + ",EXPIRY DATE: " $notafter >>$filename
+			$expired = ($expired += ($certObj))
+        }
+    }
+    
+        return $expired
+}
+
+
+function deletecert {
+    param($cert)
+    # ${DPURL}/mgmt/config/${domain}/CryptoCertificate/IU-cert-exp
+    #[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+    $response = Invoke-RestMethod -SkipCertificateCheck -SkipHttpErrorCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoCertificate/$cert" -Method Delete -Credential $credential -UseBasicParsing
+    $errormsg = $response.error
+    
+
+    if ($errormsg -eq $null) {
+        Write-Output "Certificate successfully deleted" >>$filename
+    }
+    else {
+	if($errormsg.StartsWith('Cannot be deleted')) {
+			Write-Output "FAILED TO DELETE CERT " >>$filename
+			Write-Output  $err_msg >>$filename
+			$err_msg = $errormsg[1]
+			$detail = $err_msg.Split(" ")
+			
+			$key = $detail[7].Replace(")","").Split("(")[0]
+			$value = $detail[7].Replace(")","").Split("(")[1]
+
+			switch ($key) {
+				"valcred" {
+					Write-Output "Removing $cert from $value valcred" >>$filename
+					$errorvalcred = removefromvalcred $cert $value
+					if ($errorvalcred -eq $null) {
+						Write-Output "$cert removed from $value" >>$filename
+						# calling to try to delete the cert again
+						deletecert $cert
+					}
+					else {
+						Write-Output "Error removing $cert from $value Crypto Validation Credential" >>$filename
+						Write-Output $errorvalcred >>$filename
+					}
+				}
+				#Commeting idcred deletion
+				"idcred" {
+					Write-Output "NOT Removing $cert from $value idcred" >>$filename
+				#	Write-Output "Removing $cert from $value idcred" >>$filename
+				#	$errorvalcred = removefromidcred $cert $value
+				#	if ($errorvalcred -eq $null) {
+				#		Write-Output "$cert removed from $value" >>$filename
+				#		# calling to try to delete the cert again
+				#		deletecert $cert
+				#	}
+				#	else {
+				#		Write-Output "Error removing $cert from $value Crypto Identity Credential" >>$filename
+				#		Write-Output $errorvalcred >>$filename
+				#	}
+				}
+				default {
+					Write-Output $err_msg >>$filename
+				}
+			}
+		}else{
+		Write-Output $err_msg >>$filename
+		}
+    }
+}
+
+function removefromvalcred {
+    param($cert,$value)
+
+    # getting certificates from valcred
+    #[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+    $certificates = (Invoke-RestMethod -SkipCertificateCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoValCred/$value/Certificate" -Credential $credential -UseBasicParsing).Certificate
+
+    # removing cert from json response
+    #$newcerts = $certificates | Where-Object { $_.value -ne $cert } | Select-Object -ExpandProperty href
+    $newcerts = "{""Certificate"":["
+    foreach($element in $certificates){
+        if ($element.value -ne $cert) {
+            $val= $element.value
+            $newcerts += "{""value"": ""$val""},"
+        }
+    }
+	if($newcerts.EndsWith(',')){
+		$newcerts = $newcerts.Substring(0,$newcerts.Length-1) + "]}"
+		
+		# apply new cert array to the valcred object
+		#[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+		Write-Output "UPDATE VALUECRED BODY : " + $newcerts >>$filename
+		
+		$response = Invoke-RestMethod -SkipCertificateCheck -SkipHttpErrorCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoValCred/$value/Certificate" -Method Put -Body $newcerts -Credential $credential
+
+		# set error variable
+		return $response.error
+	}else{
+		$newcerts += "]}"
+		
+		# remove the valcred as only one expired cert is available in it
+		#[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+		Write-Output "DELETE VALUECRED " + $value >>$filename
+		
+		$response = Invoke-RestMethod -SkipCertificateCheck -SkipHttpErrorCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoValCred/$value/Certificate" -Method Delete  -Credential $credential
+
+		# set error variable
+		return $response.error
+	}
+
+}
+
+
+function removefromidcred {
+    param($cert,$value)
+
+    # getting certificates from valcred
+    #[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+    $certificates = (Invoke-RestMethod -SkipCertificateCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoIdentCred/$value/Certificate" -Credential $credential -UseBasicParsing).Certificate
+
+    # removing cert from json response
+    #$newcerts = $certificates | Where-Object { $_.value -ne $cert } | Select-Object -ExpandProperty href
+    $newcerts = "{""Certificate"":["
+    foreach($element in $certificates){
+        if ($element.value -ne $cert) {
+            $val= $element.value
+            $newcerts += "{""value"": ""$val""},"
+        }
+    }
+    if($newcerts.EndsWith(',')){
+		$newcerts = $newcerts.Substring(0,$newcerts.Length-1) + "]}"
+		# apply new cert array to the valcred object
+		#[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+		Write-Output "UPDATE IDENTCRED BODY : " + $newcerts >>$filename
+		
+		$response = Invoke-RestMethod -SkipCertificateCheck -SkipHttpErrorCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoIdentCred/$value/Certificate" -Method Put -Body $newcerts -Credential $credential
+
+		# set error variable
+		return $response.error
+	}else{
+		$newcerts += "]}"
+		# remove the identcred as only one expired cert is available in it
+		#[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+		Write-Output "DELETE IDENTCRED : " + $value >>$filename
+		
+		$response = Invoke-RestMethod -SkipCertificateCheck -SkipHttpErrorCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoIdentCred/$value/Certificate" -Method Delete  -Credential $credential
+
+		# set error variable
+		return $response.error
+	}
+
+    
+}
+
+function checkcertexistance{
+	param($cert)
+	$response = (Invoke-RestMethod -SkipCertificateCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoCertificate/$cert" -Credential $credential -SkipHttpErrorCheck -StatusCodeVariable "statusCode" -UseBasicParsing)
+	Write-Output "Certificate Existance : statusCode : $statusCode" >>$filename
+	return $statusCode
+}
+
+function deletecertfilestore {
+    param($cert)
+    
+    $response = Invoke-RestMethod -SkipCertificateCheck -SkipHttpErrorCheck -Uri "${DPURL}/mgmt/filestore/${domain}/$cert" -Method Delete -Credential $credential -UseBasicParsing
+    Write-Output $response >> $filename
+    
+}
+function processdomain{
+	param($domain)
+	Write-Output "Reading DOMAIN : " $domain >>$filename
+	Write-Host "Reading DOMAIN : " $domain
+	# Get all certificates
+	#[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+	#[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls12
+	#[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+	$result = (Invoke-RestMethod -SkipCertificateCheck -Uri "${DPURL}/mgmt/config/${domain}/CryptoCertificate" -Credential $credential -UseBasicParsing).CryptoCertificate
+
+	[System.Collections.ArrayList]$expired = checkExpiration
+
+	Write-Output "The expired certificates are : $expired" >>$filename
+	# List expired certificates
+	foreach ($certx in $expired) {
+		Write-Output $certx.name >>$filename
+	}
+
+
+	# Get confirmation
+	$choice = Read-Host "Do you wish to delete expired certs? Enter Yes or No"
+	if ($choice -eq "No") {
+		exit
+	}
+
+	# Try to delete the cert to get information about the dependencies
+	Write-Output "Deleting expired certificates" >>$filename
+	foreach ($certx in $expired) {
+		if($certx.name -match '\d{6}' -Or $certx.name -match 'm\d{6}' -Or $certx.name -contains 'JWT' -Or $certx.name -contains 'jwt' -Or $certx.name -startswith '9E'){
+			Write-Output "SKIPPING THE DELETION AS PATTERN MATCHES" >>$filename
+		}else{
+			Write-Output "--------------------------------------------------------------------" >>$filename
+			Write-Output "Deleting certificate" $certx.name >>$filename
+			deletecert $certx.name
+			Write-Output "Checking the certificate  after deletion" >>$filename
+			$certexists = checkcertexistance $certx.name
+			
+			if ($certexists -eq '404'-Or $certexists -eq 404) {
+				[void]$alldeletedcerts.Add($certx.name)
+				Write-Output "Deleteting filestore :" + $certx.Filename >>$filename
+				deletecertfilestore $certx.Filename.replace(':///','/')
+			}
+		}
+	}
+	#Save Domain
+	$savedomainresponse = Invoke-RestMethod -SkipCertificateCheck -SkipHttpErrorCheck -Uri "${DPURL}/mgmt/actionqueue/${domain}" -Method Post -Body '{"SaveConfig":"0"}' -Credential $credential -UseBasicParsing
+	Write-Output "DOMAIN SAVED :" + $savedomainresponse >>$filename
+}
+	
+#Getting credentials from 
+$credential=Get-Credential
+
+$filename = Read-Host "Enter FileName for logs ; ex : Logs1.txt"
+
+#Enter DP NAME
+$dpName = Read-Host "Enter Datapower Device Name"
+
+Write-Output "Datapower Device Name : " $dpName >>$filename
+
+#Enter DP URL
+$DPURL = Read-Host "Enter Datapower URL, format https://localhost:5554"
+
+Write-Output "Datapower URL : " $DPURL >>$filename
+Write-Host "Datapower URL : " $URL
+#Variable to store all deleted certs
+[System.Collections.ArrayList]$alldeletedcerts=[System.Collections.ArrayList]::new()
+#GET All Domains first and loop on it
+$domainlist = (Invoke-RestMethod -SkipCertificateCheck -Uri "${DPURL}/mgmt/config/default/Domain" -Credential $credential -UseBasicParsing).Domain
+foreach($domainName in $domainlist){
+	if ($domainName.name -ne 'default') {
+		processdomain $domainName.name
+	}
+}
+#process default domain
+processdomain 'default'
+
+#print all deleted certs
+Write-Output "------------Writing all deleted certs here ----------------" >>$filename
+$countercert = 1
+foreach($alldeletedcert in $alldeletedcerts){
+	Write-Output " $countercert : $alldeletedcert" >>$filename
+$countercert++	
+}
