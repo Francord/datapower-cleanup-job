@@ -8,3 +8,7 @@
 4. To run the script, make sure you're in the same directory of the file and type the following command: ./deleteExpiredCerts.ps1
 
 5. Follow the prompt and enter the required information
+
+
+Francis Cordor 
+https://francordsoft.com/
